@@ -91,6 +91,12 @@
             <artifactId>spring-boot-starter-data-redis</artifactId>
         </dependency>
 
+        <!-- Quartz 定时回归（M5） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-quartz</artifactId>
+        </dependency>
+
         <!-- 只引 crypto 模块做 BCrypt 加密，不引入整个 Spring Security，保持轻量 -->
         <dependency>
             <groupId>org.springframework.security</groupId>

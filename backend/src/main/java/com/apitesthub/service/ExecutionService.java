@@ -97,6 +97,11 @@ public class ExecutionService {
      * 重复触发同一套件：拿锁失败返回 409"套件正在执行中"。
      */
     public ExecTask executeSuite(Long suiteId, Long userId) {
+        return executeSuite(suiteId, userId, "MANUAL");
+    }
+
+    /** triggerType：MANUAL（前端）/ SCHEDULED（Quartz 定时）/ RETRY（失败自动重跑） */
+    public ExecTask executeSuite(Long suiteId, Long userId, String triggerType) {
         TestSuite suite = suiteService.getOwnedSuite(suiteId, userId);
         List<Long> caseIds = suiteService.parseCaseIds(suite);
 
@@ -108,7 +113,7 @@ public class ExecutionService {
 
         ExecTask task = new ExecTask();
         task.setSuiteId(suiteId);
-        task.setTriggerType("MANUAL");
+        task.setTriggerType(triggerType);
         task.setStatus("RUNNING");
         task.setTotalCount(caseIds.size());
         task.setPassCount(0);
@@ -119,17 +124,21 @@ public class ExecutionService {
         Long taskId = task.getId();
         suiteExecutor.submit(() -> {
             try {
-                runInternal(taskId, suiteId, caseIds, userId, lockKey, lockToken);
+                runInternal(taskId, suiteId, caseIds, triggerType, userId, lockKey, lockToken);
             } catch (Exception e) {
                 log.error("suite execution crashed: taskId={}", taskId, e);
                 finishTask(taskId, 0, 0, 0, "FAILED");
+            } finally {
+                // 必须在主锁释放之后再触发重跑：runInternal 的 finally 已 unlock，
+                // 否则 retry 与主任务自身竞争同一把锁被 skip（实测 1ms 内即撞车）
+                maybeRetryFailed(taskId, suiteId, userId, triggerType);
             }
         });
         return task;
     }
 
     /** 后台执行主体：批次并行 + 每条用例完成即 Redis 计数 + WS 推送 */
-    private void runInternal(Long taskId, Long suiteId, List<Long> caseIds,
+    private void runInternal(Long taskId, Long suiteId, List<Long> caseIds, String triggerType,
                              Long userId, String lockKey, String lockToken) {
         AtomicInteger pass = new AtomicInteger();
         AtomicInteger fail = new AtomicInteger();
@@ -143,8 +152,8 @@ public class ExecutionService {
                 runStage(stage, taskId, ctx, userId, pass, fail, caseIds.size());
             }
             int duration = (int) (System.currentTimeMillis() - start);
-            finishTask(taskId, duration, pass.get(), fail.get(),
-                    fail.get() == 0 ? "SUCCESS" : "FAILED");
+            String status = fail.get() == 0 ? "SUCCESS" : "FAILED";
+            finishTask(taskId, duration, pass.get(), fail.get(), status);
         } catch (Exception e) {
             log.error("runInternal failed: taskId={}", taskId, e);
             finishTask(taskId, (int) (System.currentTimeMillis() - start),
@@ -152,6 +161,58 @@ public class ExecutionService {
         } finally {
             lockService.unlock(lockKey, lockToken);
         }
+    }
+
+    /**
+     * 失败自动重跑一次（M5）：非 RETRY 任务存在失败用例 → 只重跑失败用例，
+     * trigger_type=RETRY 单独记录（报告可区分"首次失败"与"重跑结果"）。
+     * 只重跑一层：RETRY 任务自身失败不再触发重跑，防止无限循环掩盖真失败。
+     * 调用时机：主任务锁已释放后（见 executeSuite），重跑自己再拿锁防与手动触发撞车。
+     */
+    private void maybeRetryFailed(Long taskId, Long suiteId, Long userId, String triggerType) {
+        if ("RETRY".equals(triggerType)) {
+            return;
+        }
+        List<Long> failedCaseIds = resultMapper.selectList(new LambdaQueryWrapper<ExecResult>()
+                        .eq(ExecResult::getTaskId, taskId)
+                        .eq(ExecResult::getPassed, 0))
+                .stream().map(ExecResult::getCaseId).distinct().toList();
+        if (failedCaseIds.isEmpty()) {
+            return;
+        }
+        log.info("task {} has {} failed cases, auto retry once", taskId, failedCaseIds.size());
+        suiteExecutor.submit(() -> {
+            String lockKey = "lock:suite:" + suiteId;
+            String lockToken = lockService.tryLock(lockKey);
+            if (lockToken == null) {
+                log.info("retry skipped: suite {} is running", suiteId);
+                return;
+            }
+            try {
+                ExecTask retryTask = new ExecTask();
+                retryTask.setSuiteId(suiteId);
+                retryTask.setTriggerType("RETRY");
+                retryTask.setStatus("RUNNING");
+                retryTask.setTotalCount(failedCaseIds.size());
+                retryTask.setStartedAt(LocalDateTime.now());
+                taskMapper.insert(retryTask);
+
+                AtomicInteger pass = new AtomicInteger();
+                AtomicInteger fail = new AtomicInteger();
+                long start = System.currentTimeMillis();
+                VariableContext ctx = new VariableContext();
+                List<StagePlanner.CaseWithApi> cases = loadCases(failedCaseIds, userId);
+                for (StagePlanner.Stage stage : StagePlanner.plan(cases)) {
+                    runStage(stage, retryTask.getId(), ctx, userId, pass, fail, failedCaseIds.size());
+                }
+                finishTask(retryTask.getId(), System.currentTimeMillis() - start,
+                        pass.get(), fail.get(), fail.get() == 0 ? "SUCCESS" : "FAILED");
+            } catch (Exception e) {
+                log.error("retry failed: {}", e.getMessage());
+            } finally {
+                lockService.unlock(lockKey, lockToken);
+            }
+        });
     }
 
     /** 任务收尾：落库终态 + Redis 状态缓存 + finish 事件广播 */

@@ -18,6 +18,9 @@
       <el-tab-pane label="测试套件" name="suites">
         <SuitePanel :project-id="projectId" />
       </el-tab-pane>
+      <el-tab-pane label="定时计划" name="schedules">
+        <SchedulePanel :project-id="projectId" />
+      </el-tab-pane>
     </el-tabs>
   </el-card>
 </template>
@@ -28,6 +31,7 @@ import { useRoute } from 'vue-router'
 import ApiPanel from '../components/ApiPanel.vue'
 import CasePanel from '../components/CasePanel.vue'
 import SuitePanel from '../components/SuitePanel.vue'
+import SchedulePanel from '../components/SchedulePanel.vue'
 
 const route = useRoute()
 const projectId = computed(() => route.params.id)

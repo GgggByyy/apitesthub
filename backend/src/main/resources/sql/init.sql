@@ -87,3 +87,13 @@ CREATE TABLE IF NOT EXISTS `exec_result` (
     fail_reason VARCHAR(500),
     KEY idx_task (task_id)
 );
+
+-- M5：定时回归计划
+CREATE TABLE IF NOT EXISTS `schedule_job` (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    suite_id BIGINT NOT NULL,
+    cron_expr VARCHAR(50) NOT NULL,          -- 如 0 * * * * ? 每分钟
+    enabled TINYINT DEFAULT 1,
+    last_fire_time DATETIME,
+    KEY idx_suite (suite_id)
+);

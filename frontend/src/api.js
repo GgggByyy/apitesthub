@@ -39,3 +39,18 @@ http.interceptors.response.use(
 )
 
 export default http
+
+/** 带鉴权的文件下载（导出报告等 blob 响应） */
+export async function download(path, filename) {
+  const token = localStorage.getItem('token')
+  const resp = await fetch('http://localhost:8080' + path, {
+    headers: { Authorization: 'Bearer ' + token }
+  })
+  const blob = await resp.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
