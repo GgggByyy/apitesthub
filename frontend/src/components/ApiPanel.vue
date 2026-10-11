@@ -1,13 +1,8 @@
 <template>
-  <el-card>
-    <div class="toolbar">
-      <div>
-        <el-button link @click="$router.push('/')">← 返回</el-button>
-        <h3 class="inline">接口定义（项目 #{{ projectId }}）</h3>
-      </div>
+  <div>
+    <div class="row">
       <el-button type="primary" @click="openCreate">新增接口</el-button>
     </div>
-
     <el-table :data="apis" v-loading="loading">
       <el-table-column prop="id" label="ID" width="60" />
       <el-table-column prop="name" label="接口名称" min-width="140" />
@@ -52,8 +47,7 @@
                     placeholder='JSON 对象（GET 的 query string），如 {"page":"1"}' />
         </el-form-item>
         <el-form-item label="请求体">
-          <el-input v-model="form.body" type="textarea" :rows="4"
-                    placeholder='POST/PUT 的 body，JSON 文本' />
+          <el-input v-model="form.body" type="textarea" :rows="4" placeholder='POST/PUT 的 body，JSON 文本' />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -76,17 +70,15 @@
         <pre class="resp small">{{ tryResult.headers }}</pre>
       </template>
     </el-dialog>
-  </el-card>
+  </div>
 </template>
 
 <script setup>
-import { reactive, ref, computed, onMounted } from 'vue'
-import { useRoute } from 'vue-router'
+import { reactive, ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import http from '../api'
 
-const route = useRoute()
-const projectId = computed(() => route.params.id)
+const props = defineProps({ projectId: String })
 
 const apis = ref([])
 const loading = ref(false)
@@ -101,7 +93,7 @@ const form = reactive({ name: '', method: 'GET', url: '', headers: '', params: '
 async function load() {
   loading.value = true
   try {
-    apis.value = await http.get(`/api/projects/${projectId.value}/apis`)
+    apis.value = await http.get(`/api/projects/${props.projectId}/apis`)
   } finally {
     loading.value = false
   }
@@ -127,7 +119,7 @@ async function save() {
   if (editing.value) {
     await http.put(`/api/apis/${editing.value.id}`, payload)
   } else {
-    await http.post(`/api/projects/${projectId.value}/apis`, payload)
+    await http.post(`/api/projects/${props.projectId}/apis`, payload)
   }
   ElMessage.success('已保存')
   dialogVisible.value = false
@@ -158,8 +150,7 @@ onMounted(load)
 </script>
 
 <style scoped>
-.toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-.inline { display: inline; margin-left: 8px; }
+.row { display: flex; justify-content: flex-end; margin-bottom: 10px; }
 .resp { background: #1e1e1e; color: #d4d4d4; padding: 12px; border-radius: 6px; max-height: 260px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
 .resp.small { max-height: 140px; font-size: 12px; }
 h4 { margin: 14px 0 6px; }
