@@ -31,9 +31,19 @@
 | M1 | 项目/接口定义管理（CRUD + 试调 + Vue3 前端） | ✅ |
 | M2 | 执行引擎 v1：同步执行套件 + 三类断言 + 结果落库 | ✅ |
 | M3 | 执行引擎 v2：线程池并发 + 参数化变量 + 链式调用 | ✅ |
-| M4 | WebSocket 实时日志 + Redis 状态缓存/分布式锁 | ⬜ |
+| M4 | WebSocket 实时日志 + Redis 状态缓存/分布式锁 | ✅ |
 | M5 | Quartz 定时回归 + 失败重跑 + 测试报告 | ⬜ |
 | M6 | Docker Compose 一键部署 + 单元测试 | ⬜ |
+
+## M4 已实现
+
+- **任务异步化**：执行触发立即返回（12ms，原同步需 ~850ms）；套件调度池与用例执行池分离（不同工作粒度，避免互相饥饿）
+- **WebSocket 实时日志**：前端订阅任务（`/ws/task?taskId=`，JWT 握手校验——浏览器 WS API 不能自定义 header，token 走 query）；引擎每完成一条用例推送事件，实测 500 条任务浏览器收到全部 501 条事件；`ConcurrentWebSocketSessionDecorator` 解决 session 并发发送（串行化 + 慢消费者缓冲上限自动断开）
+- **Redis 三件套**：
+  - `INCR task:progress:{id}` 实时进度 + `SET task:live:{id}` 实时通过/失败数（列表页 RUNNING 行合并展示）
+  - `SET task:status:{id}` 终态缓存 TTL 1h
+  - `SETNX lock:suite:{id} EX 300` 分布式锁防重复触发：并发双触发一进一拒（409）；value 存 UUID + Lua 比对删除防误删
+- **降级容错**：Redis 宕机时无锁执行 + 直查库（实测通过）；降级 catch 面用 `DataAccessException` 父类——Lettuce 命令超时抛 `QueryTimeoutException` 而非 `RedisConnectionFailureException`（实测踩坑）
 
 ## M3 已实现（执行引擎 v2，项目技术核心）
 

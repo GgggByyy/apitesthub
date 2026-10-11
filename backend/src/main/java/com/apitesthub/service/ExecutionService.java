@@ -16,32 +16,44 @@ import com.apitesthub.exception.BizException;
 import com.apitesthub.mapper.ApiInfoMapper;
 import com.apitesthub.mapper.ExecResultMapper;
 import com.apitesthub.mapper.ExecTaskMapper;
+import com.apitesthub.websocket.TaskEventBroadcaster;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.dao.DataAccessException;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * 执行引擎 v2（M3：批次并行 + 变量体系）。
+ * 执行引擎 v2.1（M4：任务异步化 + WebSocket 实时推送 + Redis）。
  *
- * 执行模型：StagePlanner 依赖分析把用例切批——批次内用例提交线程池并行（CountDownLatch 对齐），
- * 批次间串行（前批生产的变量解锁后才放行后批）。链式用例（登录→{{token}}→增删改查）天然按序，
- * 无依赖用例自动并行。
+ * executeSuite：拿分布式锁（防同套件重复触发）→ 建 RUNNING 任务 → 提交 suiteExecutor
+ * 立即返回 taskId；前端连 WS 订阅任务，每条用例完成即推送日志事件（替代轮询）。
  *
- * 上下文：任务级 VariableContext（ConcurrentHashMap），作为参数在闭包内传递——
- * 不同任务互不可见，同一任务内并发工作线程安全读写。
+ * Redis 三个用途：
+ *  1. INCR task:progress:{id} —— 实时进度计数（天然原子）
+ *  2. SET task:status:{id} —— 任务终态缓存 TTL 1h，详情页高频轮询不打数据库
+ *  3. lock:suite:{id} —— SETNX 分布式锁（见 LockService）
+ * Redis 宕机全线降级：进度不计数、缓存直查库、无锁执行——平台可用性优先。
  */
 @Service
 public class ExecutionService {
+
+    private static final Logger log = LoggerFactory.getLogger(ExecutionService.class);
 
     private final ExecTaskMapper taskMapper;
     private final ExecResultMapper resultMapper;
@@ -52,12 +64,19 @@ public class ExecutionService {
     private final HttpExecutor httpExecutor;
     private final ObjectMapper objectMapper;
     private final ThreadPoolExecutor caseExecutor;
+    private final ThreadPoolExecutor suiteExecutor;
+    private final LockService lockService;
+    private final StringRedisTemplate redis;
+    private final TaskEventBroadcaster broadcaster;
 
     public ExecutionService(ExecTaskMapper taskMapper, ExecResultMapper resultMapper,
                             ApiInfoMapper apiInfoMapper, SuiteService suiteService,
                             TestCaseService caseService, ProjectService projectService,
                             HttpExecutor httpExecutor, ObjectMapper objectMapper,
-                            @Qualifier("caseExecutor") ThreadPoolExecutor caseExecutor) {
+                            @Qualifier("caseExecutor") ThreadPoolExecutor caseExecutor,
+                            @Qualifier("suiteExecutor") ThreadPoolExecutor suiteExecutor,
+                            LockService lockService, StringRedisTemplate redis,
+                            TaskEventBroadcaster broadcaster) {
         this.taskMapper = taskMapper;
         this.resultMapper = resultMapper;
         this.apiInfoMapper = apiInfoMapper;
@@ -67,12 +86,25 @@ public class ExecutionService {
         this.httpExecutor = httpExecutor;
         this.objectMapper = objectMapper;
         this.caseExecutor = caseExecutor;
+        this.suiteExecutor = suiteExecutor;
+        this.lockService = lockService;
+        this.redis = redis;
+        this.broadcaster = broadcaster;
     }
 
-    /** 执行套件：批次并行；全部批次完成后返回任务（外部仍同步等待，M4 引入异步+推送） */
+    /**
+     * 触发执行（异步）：锁 → 建任务 → 提交后台 → 立即返回。
+     * 重复触发同一套件：拿锁失败返回 409"套件正在执行中"。
+     */
     public ExecTask executeSuite(Long suiteId, Long userId) {
         TestSuite suite = suiteService.getOwnedSuite(suiteId, userId);
         List<Long> caseIds = suiteService.parseCaseIds(suite);
+
+        String lockKey = "lock:suite:" + suiteId;
+        String lockToken = lockService.tryLock(lockKey);
+        if (lockToken == null) {
+            throw new BizException(409, "suite is already running: " + suiteId);
+        }
 
         ExecTask task = new ExecTask();
         task.setSuiteId(suiteId);
@@ -84,50 +116,90 @@ public class ExecutionService {
         task.setStartedAt(LocalDateTime.now());
         taskMapper.insert(task);
 
+        Long taskId = task.getId();
+        suiteExecutor.submit(() -> {
+            try {
+                runInternal(taskId, suiteId, caseIds, userId, lockKey, lockToken);
+            } catch (Exception e) {
+                log.error("suite execution crashed: taskId={}", taskId, e);
+                finishTask(taskId, 0, 0, 0, "FAILED");
+            }
+        });
+        return task;
+    }
+
+    /** 后台执行主体：批次并行 + 每条用例完成即 Redis 计数 + WS 推送 */
+    private void runInternal(Long taskId, Long suiteId, List<Long> caseIds,
+                             Long userId, String lockKey, String lockToken) {
         AtomicInteger pass = new AtomicInteger();
         AtomicInteger fail = new AtomicInteger();
         VariableContext ctx = new VariableContext();
         long start = System.currentTimeMillis();
-
         try {
             List<StagePlanner.CaseWithApi> cases = loadCases(caseIds, userId);
             List<StagePlanner.Stage> stages = StagePlanner.plan(cases);
 
             for (StagePlanner.Stage stage : stages) {
-                runStage(stage, task.getId(), ctx, userId, pass, fail);
+                runStage(stage, taskId, ctx, userId, pass, fail, caseIds.size());
             }
+            int duration = (int) (System.currentTimeMillis() - start);
+            finishTask(taskId, duration, pass.get(), fail.get(),
+                    fail.get() == 0 ? "SUCCESS" : "FAILED");
+        } catch (Exception e) {
+            log.error("runInternal failed: taskId={}", taskId, e);
+            finishTask(taskId, (int) (System.currentTimeMillis() - start),
+                    pass.get(), fail.get(), "FAILED");
         } finally {
-            task.setDurationMs(System.currentTimeMillis() - start);
-            task.setPassCount(pass.get());
-            task.setFailCount(fail.get());
-            task.setStatus(fail.get() == 0 ? "SUCCESS" : "FAILED");
-            task.setFinishedAt(LocalDateTime.now());
-            taskMapper.updateById(task);
+            lockService.unlock(lockKey, lockToken);
         }
-        return task;
     }
 
-    /** 执行一个批次：单用例直接跑（省提交开销），多用例提交线程池并行，latch 对齐后进入下一批 */
+    /** 任务收尾：落库终态 + Redis 状态缓存 + finish 事件广播 */
+    private void finishTask(Long taskId, long durationMs, int pass, int fail, String status) {
+        ExecTask task = taskMapper.selectById(taskId);
+        if (task != null) {
+            task.setDurationMs(durationMs);
+            task.setPassCount(pass);
+            task.setFailCount(fail);
+            task.setStatus(status);
+            task.setFinishedAt(LocalDateTime.now());
+            taskMapper.updateById(task);
+
+            Map<String, Object> event = new LinkedHashMap<>();
+            event.put("event", "finish");
+            event.put("status", status);
+            event.put("passCount", pass);
+            event.put("failCount", fail);
+            event.put("durationMs", durationMs);
+            broadcaster.broadcast(taskId, event);
+
+            try {
+                Map<String, Object> cached = new LinkedHashMap<>();
+                cached.put("status", status);
+                cached.put("passCount", pass);
+                cached.put("failCount", fail);
+                cached.put("totalCount", task.getTotalCount());
+                redis.opsForValue().set("task:status:" + taskId,
+                        toJson(cached), Duration.ofHours(1));
+            } catch (DataAccessException | IllegalStateException e) {
+                log.warn("cache task status failed (redis down): {}", e.getMessage());
+            }
+        }
+    }
+
+    /** 执行一个批次：单用例直接跑，多用例提交用例池并行，latch 对齐 */
     private void runStage(StagePlanner.Stage stage, Long taskId, VariableContext ctx,
-                          Long userId, AtomicInteger pass, AtomicInteger fail) {
+                          Long userId, AtomicInteger pass, AtomicInteger fail, int total) {
         List<StagePlanner.CaseWithApi> cases = stage.getCases();
         if (cases.size() == 1) {
-            if (executeOneCase(taskId, cases.get(0), ctx, userId)) {
-                pass.incrementAndGet();
-            } else {
-                fail.incrementAndGet();
-            }
+            executeAndReport(taskId, cases.get(0), ctx, userId, pass, fail, total);
             return;
         }
         CountDownLatch latch = new CountDownLatch(cases.size());
         for (StagePlanner.CaseWithApi c : cases) {
             caseExecutor.submit(() -> {
                 try {
-                    if (executeOneCase(taskId, c, ctx, userId)) {
-                        pass.incrementAndGet();
-                    } else {
-                        fail.incrementAndGet();
-                    }
+                    executeAndReport(taskId, c, ctx, userId, pass, fail, total);
                 } finally {
                     latch.countDown();
                 }
@@ -141,9 +213,51 @@ public class ExecutionService {
         }
     }
 
-    /** 单用例执行单元：渲染变量 → 发请求 → 断言 → 提取变量 → 明细落库 */
-    private boolean executeOneCase(Long taskId, StagePlanner.CaseWithApi cwa,
-                                   VariableContext ctx, Long userId) {
+    /** 单用例执行 + Redis 进度计数/实时统计 + WS 日志事件推送 */
+    private void executeAndReport(Long taskId, StagePlanner.CaseWithApi cwa,
+                                  VariableContext ctx, Long userId,
+                                  AtomicInteger pass, AtomicInteger fail, int total) {
+        ExecResult result = executeOneCase(taskId, cwa, ctx, userId);
+        boolean ok = result.getPassed() == 1;
+        if (ok) {
+            pass.incrementAndGet();
+        } else {
+            fail.incrementAndGet();
+        }
+        int progress = incrProgress(taskId);
+        setLive(taskId, pass.get(), fail.get());
+
+        Map<String, Object> event = new LinkedHashMap<>();
+        event.put("event", "case");
+        event.put("caseId", cwa.testCase().getId());
+        event.put("caseName", cwa.testCase().getName());
+        event.put("passed", ok);
+        event.put("timeMs", result.getResponseTimeMs());
+        event.put("progress", progress + "/" + total);
+        broadcaster.broadcast(taskId, event);
+    }
+
+    private int incrProgress(Long taskId) {
+        try {
+            Long v = redis.opsForValue().increment("task:progress:" + taskId);
+            return v == null ? 0 : v.intValue();
+        } catch (DataAccessException | IllegalStateException e) {
+            return -1; // Redis 宕机：进度不可用，事件里 progress 显示 -1（前端容错）
+        }
+    }
+
+    /** 实时通过/失败数（列表页 RUNNING 行合并显示；库里的值是执行前的 0） */
+    private void setLive(Long taskId, int pass, int fail) {
+        try {
+            redis.opsForValue().set("task:live:" + taskId, pass + ":" + fail, Duration.ofHours(1));
+        } catch (DataAccessException | IllegalStateException ignored) {
+            // Redis 宕机：列表显示库值，可用性优先
+        }
+    }
+
+    /** 单用例执行单元：渲染变量 → 发请求 → 断言 → 提取变量 → 明细落库，返回明细 */
+    private ExecResult executeOneCase(Long taskId, StagePlanner.CaseWithApi cwa,
+                                      VariableContext ctx, Long userId) {
         TestCase testCase = cwa.testCase();
         ExecResult result = new ExecResult();
         result.setTaskId(taskId);
@@ -164,7 +278,6 @@ public class ExecutionService {
             result.setPassed(failReason == null ? 1 : 0);
             result.setFailReason(truncate(failReason));
 
-            // 断言完成后提取变量（即使断言失败也提取：登录失败时 token 本就不该用）
             if (cwa.rules() != null && !cwa.rules().isEmpty()) {
                 ctx.extract(tryResult.getBody(), cwa.rules());
             }
@@ -173,10 +286,9 @@ public class ExecutionService {
             result.setFailReason(truncate("execution error: " + e.getMessage()));
         }
         resultMapper.insert(result);
-        return result.getPassed() == 1;
+        return result;
     }
 
-    /** 变量渲染：拷贝接口定义后替换 {{var}}（不污染原始定义），未定义变量抛 400 */
     private ApiInfo renderApi(ApiInfo api, VariableContext ctx) {
         ApiInfo rendered = new ApiInfo();
         rendered.setId(api.getId());
@@ -191,7 +303,6 @@ public class ExecutionService {
         return rendered;
     }
 
-    /** 批量加载用例 + 接口定义 + 解析提取规则 */
     private List<StagePlanner.CaseWithApi> loadCases(List<Long> caseIds, Long userId) {
         List<StagePlanner.CaseWithApi> list = new ArrayList<>();
         for (Long caseId : caseIds) {
@@ -205,7 +316,7 @@ public class ExecutionService {
         return list;
     }
 
-    /** 任务列表：只能看到自己项目下套件产生的任务 */
+    /** 任务列表：RUNNING 任务的实时进度从 Redis 合并（数据库值是执行前的 0） */
     public List<ExecTask> listTasks(Long userId) {
         List<Long> suiteIds = new ArrayList<>();
         for (Project project : projectService.list(userId)) {
@@ -215,10 +326,30 @@ public class ExecutionService {
         if (suiteIds.isEmpty()) {
             return List.of();
         }
-        return taskMapper.selectList(new LambdaQueryWrapper<ExecTask>()
+        List<ExecTask> tasks = taskMapper.selectList(new LambdaQueryWrapper<ExecTask>()
                 .in(ExecTask::getSuiteId, suiteIds)
                 .orderByDesc(ExecTask::getId)
                 .last("limit 100"));
+        for (ExecTask task : tasks) {
+            if ("RUNNING".equals(task.getStatus())) {
+                mergeLiveProgress(task);
+            }
+        }
+        return tasks;
+    }
+
+    /** RUNNING 任务：从 Redis 拿实时 pass/fail（键不存在或 Redis 挂了则保持库值） */
+    private void mergeLiveProgress(ExecTask task) {
+        try {
+            String progress = redis.opsForValue().get("task:live:" + task.getId());
+            if (progress != null) {
+                String[] parts = progress.split(":");
+                task.setPassCount(Integer.parseInt(parts[0]));
+                task.setFailCount(Integer.parseInt(parts[1]));
+            }
+        } catch (DataAccessException | IllegalStateException ignored) {
+            // Redis 不可用：显示库里的值（可能是 0/0），可用性优先
+        }
     }
 
     public ExecTask getTask(Long taskId, Long userId) {
@@ -227,6 +358,9 @@ public class ExecutionService {
             throw new BizException(404, "task not found");
         }
         suiteService.getOwnedSuite(task.getSuiteId(), userId);
+        if ("RUNNING".equals(task.getStatus())) {
+            mergeLiveProgress(task);
+        }
         return task;
     }
 
@@ -235,6 +369,14 @@ public class ExecutionService {
         return resultMapper.selectList(new LambdaQueryWrapper<ExecResult>()
                 .eq(ExecResult::getTaskId, taskId)
                 .orderByAsc(ExecResult::getId));
+    }
+
+    private String toJson(Map<String, Object> map) {
+        try {
+            return objectMapper.writeValueAsString(map);
+        } catch (IOException e) {
+            return "{}";
+        }
     }
 
     private List<VariableContext.ExtractRule> parseRules(String json) {

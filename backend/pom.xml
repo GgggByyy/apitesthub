@@ -79,6 +79,18 @@
             <version>2.9.0</version>
         </dependency>
 
+        <!-- WebSocket 实时日志推送（M4） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-websocket</artifactId>
+        </dependency>
+
+        <!-- Redis：执行状态缓存 + SETNX 分布式锁防重复触发（M4） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
         <!-- 只引 crypto 模块做 BCrypt 加密，不引入整个 Spring Security，保持轻量 -->
         <dependency>
             <groupId>org.springframework.security</groupId>

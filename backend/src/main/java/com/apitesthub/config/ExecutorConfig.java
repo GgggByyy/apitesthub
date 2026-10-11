@@ -40,4 +40,24 @@ public class ExecutorConfig {
                 },
                 new ThreadPoolExecutor.CallerRunsPolicy());
     }
+
+    private final AtomicInteger suiteCounter = new AtomicInteger();
+
+    /**
+     * 套件调度池：与用例执行池分离（M4 任务异步化）。
+     * 调度线程负责"推进批次/汇总落库"，用例线程负责"发请求跑断言"——
+     * 两类工作粒度不同，分池避免互相饥饿（套件调度不会被大量用例任务挤占）。
+     */
+    @Bean("suiteExecutor")
+    public ThreadPoolExecutor suiteExecutor() {
+        return new ThreadPoolExecutor(
+                2, 4, 60, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(100),
+                r -> {
+                    Thread t = new Thread(r, "suite-exec-" + suiteCounter.incrementAndGet());
+                    t.setDaemon(false);
+                    return t;
+                },
+                new ThreadPoolExecutor.AbortPolicy());
+    }
 }
