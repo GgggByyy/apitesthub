@@ -1,0 +1,37 @@
+# 本地开发依赖：MySQL 8 + Redis 7（Redis 自 M4 起使用，先一并起好）
+# 用法：docker compose -f docker-compose.dev.yml up -d
+# root 密码默认 apitesthub_dev（仅本地开发；生产环境必须用环境变量 MYSQL_ROOT_PASSWORD 覆盖）
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: apitesthub-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-apitesthub_dev}
+      MYSQL_DATABASE: apitesthub
+      TZ: Asia/Shanghai
+    ports:
+      - "3306:3306"
+    volumes:
+      - apitesthub-mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p$$MYSQL_ROOT_PASSWORD"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    container_name: apitesthub-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - apitesthub-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  apitesthub-mysql-data:
+  apitesthub-redis-data:

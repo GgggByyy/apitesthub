@@ -1,0 +1,8 @@
+# 本地开发配置模板：复制为 application-local.yml 并填写真实值（不入库）
+# MySQL 可用 docker compose -f docker-compose.dev.yml up -d 启动，root 密码默认 apitesthub_dev
+spring:
+  datasource:
+    username: root
+    password: apitesthub_dev
+
+# 启动：mvn spring-boot:run -Dspring-boot.run.profiles=local
