@@ -22,6 +22,9 @@ public class TestCaseRequest {
     /** JSON 数组，如 [{"type":"status","op":"eq","expect":200}]；可为空 = 恒通过 */
     private String assertions;
 
+    /** JSON 数组，如 [{"source":"$.data.token","var":"token"}]；链式调用的变量提取规则 */
+    private String extractRules;
+
     private Integer enabled;
 
     public String getName() {
@@ -54,6 +57,14 @@ public class TestCaseRequest {
 
     public void setAssertions(String assertions) {
         this.assertions = assertions;
+    }
+
+    public String getExtractRules() {
+        return extractRules;
+    }
+
+    public void setExtractRules(String extractRules) {
+        this.extractRules = extractRules;
     }
 
     public Integer getEnabled() {

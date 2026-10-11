@@ -10,10 +10,20 @@
       <el-table-column label="目标接口" min-width="140">
         <template #default="{ row }">{{ apiName(row.apiId) }}</template>
       </el-table-column>
-      <el-table-column label="断言" min-width="240">
+      <el-table-column label="断言" min-width="200">
         <template #default="{ row }">
           <el-tag v-for="(a, i) in parseAssertions(row)" :key="i" size="small" class="tag">
             {{ shortAssertion(a) }}
+          </el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="变量(消费→生产)" min-width="160">
+        <template #default="{ row }">
+          <el-tag v-for="v in consumedVars(row)" :key="'c'+v" size="small" type="warning" class="tag">
+            {{ placeholder(v) }}
+          </el-tag>
+          <el-tag v-for="r in parseRules(row)" :key="'p'+r.var" size="small" type="success" class="tag">
+            →{{ r.var }}
           </el-tag>
         </template>
       </el-table-column>
@@ -67,6 +77,20 @@
             + 添加断言
           </el-button>
         </el-form-item>
+        <el-form-item label="变量提取">
+          <div class="hint" style="width: 100%; margin-bottom: 6px">
+            响应后按 JSONPath 提取存入变量，供后续用例以 <code v-pre>{{var}}</code> 引用（链式调用）
+          </div>
+          <div v-for="(r, i) in form.extractRules" :key="i" class="assert-row">
+            <el-input v-model="r.source" placeholder="$.data.token" style="width: 180px" />
+            <span class="arrow">→</span>
+            <el-input v-model="r.var" placeholder="变量名 token" style="width: 150px" />
+            <el-button link type="danger" @click="form.extractRules.splice(i, 1)">✕</el-button>
+          </div>
+          <el-button size="small" @click="form.extractRules.push({ source: '', var: '' })">
+            + 添加提取规则
+          </el-button>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
@@ -89,7 +113,7 @@ const loading = ref(false)
 const dialogVisible = ref(false)
 const editing = ref(null)
 
-const form = reactive({ name: '', apiId: null, sortOrder: 0, assertions: [] })
+const form = reactive({ name: '', apiId: null, sortOrder: 0, assertions: [], extractRules: [] })
 
 async function load() {
   loading.value = true
@@ -108,6 +132,27 @@ function apiName(apiId) {
   return api ? `#${api.id} ${api.name}` : apiId
 }
 
+/** 该用例目标接口消费的 {{var}} 占位符（黄标展示） */
+function consumedVars(row) {
+  const api = apis.value.find(a => a.id === row.apiId)
+  if (!api) return []
+  const text = `${api.url || ''}|${api.headers || ''}|${api.params || ''}|${api.body || ''}`
+  return [...new Set([...text.matchAll(/\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g)].map(m => m[1]))]
+}
+
+/** 模板里直接写 {{}} 会被 Vue 解析为插值，经方法返回规避 */
+function placeholder(v) {
+  return '{{' + v + '}}'
+}
+
+function parseRules(row) {
+  try {
+    return JSON.parse(row.extractRules || '[]')
+  } catch {
+    return []
+  }
+}
+
 function parseAssertions(row) {
   try {
     return JSON.parse(row.assertions || '[]')
@@ -123,7 +168,7 @@ function shortAssertion(a) {
 
 function openCreate() {
   editing.value = null
-  Object.assign(form, { name: '', apiId: null, sortOrder: 0, assertions: [{ type: 'status', op: 'eq', expect: '200', path: '' }] })
+  Object.assign(form, { name: '', apiId: null, sortOrder: 0, assertions: [{ type: 'status', op: 'eq', expect: '200', path: '' }], extractRules: [] })
   dialogVisible.value = true
 }
 
@@ -133,18 +178,19 @@ function openEdit(row) {
     name: row.name,
     apiId: row.apiId,
     sortOrder: row.sortOrder,
-    assertions: parseAssertions(row).map(a => ({ ...a, expect: String(a.expect), path: a.path || '' }))
+    assertions: parseAssertions(row).map(a => ({ ...a, expect: String(a.expect), path: a.path || '' })),
+    extractRules: parseRules(row).map(r => ({ ...r }))
   })
   dialogVisible.value = true
 }
 
 async function save() {
-  // expect 统一转字符串交给后端（数字型字符串会被 Jackson 正确反序列化）
   const payload = {
     name: form.name,
     apiId: form.apiId,
     sortOrder: form.sortOrder,
-    assertions: form.assertions.length ? JSON.stringify(form.assertions) : null
+    assertions: form.assertions.length ? JSON.stringify(form.assertions) : null,
+    extractRules: form.extractRules.length ? JSON.stringify(form.extractRules.filter(r => r.source && r.var)) : null
   }
   if (editing.value) {
     await http.put(`/api/cases/${editing.value.id}`, payload)
@@ -168,6 +214,7 @@ onMounted(load)
 <style scoped>
 .row { display: flex; justify-content: flex-end; margin-bottom: 10px; }
 .tag { margin-right: 4px; }
-.assert-row { display: flex; gap: 6px; margin-bottom: 8px; align-items: center; }
-.hint { margin-left: 10px; color: #999; font-size: 12px; }
+.assert-row { display: flex; gap: 6px; margin-bottom: 8px; align-items: center; width: 100%; }
+.hint { margin-left: 0; color: #999; font-size: 12px; }
+.arrow { color: #999; }
 </style>

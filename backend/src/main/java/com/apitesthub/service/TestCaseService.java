@@ -58,6 +58,7 @@ public class TestCaseService {
             throw new BizException(400, "apiId not in this project: " + req.getApiId());
         }
         validateAssertions(req.getAssertions());
+        validateExtractRules(req.getExtractRules());
         TestCase testCase = new TestCase();
         apply(testCase, req, projectId);
         caseMapper.insert(testCase);
@@ -71,6 +72,7 @@ public class TestCaseService {
             throw new BizException(400, "apiId not in this project: " + req.getApiId());
         }
         validateAssertions(req.getAssertions());
+        validateExtractRules(req.getExtractRules());
         apply(testCase, req, testCase.getProjectId());
         caseMapper.updateById(testCase);
         return testCase;
@@ -87,7 +89,30 @@ public class TestCaseService {
         testCase.setName(req.getName());
         testCase.setSortOrder(req.getSortOrder() == null ? 0 : req.getSortOrder());
         testCase.setAssertions(req.getAssertions());
+        testCase.setExtractRules(req.getExtractRules());
         testCase.setEnabled(req.getEnabled() == null ? 1 : req.getEnabled());
+    }
+
+    /** 保存前校验提取规则：可解析 JSON 数组 + 每条 source/var 合法（var 为标识符） */
+    private void validateExtractRules(String rules) {
+        if (rules == null || rules.isBlank()) {
+            return;
+        }
+        List<com.apitesthub.engine.VariableContext.ExtractRule> list;
+        try {
+            list = objectMapper.readValue(rules, new TypeReference<>() {
+            });
+        } catch (IOException e) {
+            throw new BizException(400, "extract_rules is not a valid JSON array: " + e.getMessage());
+        }
+        for (var r : list) {
+            if (r.getSource() == null || r.getSource().isBlank()) {
+                throw new BizException(400, "extract rule requires source (e.g. $.data.token)");
+            }
+            if (r.getVar() == null || !r.getVar().matches("[A-Za-z_][A-Za-z0-9_]*")) {
+                throw new BizException(400, "extract rule var must be an identifier: " + r.getVar());
+            }
+        }
     }
 
     /** 保存前校验断言结构：可解析 JSON 数组 + 每条 type/op 合法 + jsonpath 必须带 path */

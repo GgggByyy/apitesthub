@@ -30,10 +30,18 @@
 | M0 | 工程骨架 + JWT 鉴权 + 统一响应/全局异常 + BCrypt | ✅ |
 | M1 | 项目/接口定义管理（CRUD + 试调 + Vue3 前端） | ✅ |
 | M2 | 执行引擎 v1：同步执行套件 + 三类断言 + 结果落库 | ✅ |
-| M3 | 执行引擎 v2：线程池并发 + 参数化变量 + 链式调用 | ⬜ |
+| M3 | 执行引擎 v2：线程池并发 + 参数化变量 + 链式调用 | ✅ |
 | M4 | WebSocket 实时日志 + Redis 状态缓存/分布式锁 | ⬜ |
 | M5 | Quartz 定时回归 + 失败重跑 + 测试报告 | ⬜ |
 | M6 | Docker Compose 一键部署 + 单元测试 | ⬜ |
+
+## M3 已实现（执行引擎 v2，项目技术核心）
+
+- **变量体系**：任务级 `VariableContext`（ConcurrentHashMap，方法参数传递而非 ThreadLocal——线程池线程复用会串数据）；接口定义中 `{{var}}` 占位符自动渲染，未定义变量显式失败
+- **链式调用**：用例 `extract_rules` 按 JSONPath 从响应提取变量（如 `$.data.token → token`），后续用例的 headers/url/body 引用 `{{token}}` 自动注入——登录态自动续接，无需手动填 token
+- **批次并行执行模型**（StagePlanner 依赖分析）：按变量消费/生产关系把套件用例切批——依赖已解锁的用例同批**并行**（自建 ThreadPoolExecutor），依赖前序变量的用例开新批**串行等待**；批次内生产的变量批次完成后解锁（并行执行中彼此不可见）
+- **自建线程池**：`ThreadPoolExecutor(8, 16, 60s, LinkedBlockingQueue(200), 命名工厂, CallerRunsPolicy)`——有界队列防 OOM，CallerRuns 保证用例不丢（提交线程亲自执行的天然背压）
+- **验收数据**：链式 token 自动注入（请求快照可证）；500 条独立用例 647ms 全过（16 线程并行）；并发双任务变量严格隔离（无登录链的任务消费 `{{token}}` 报 undefined variable，不会捡到其他任务的 token）
 
 ## M2 已实现
 
