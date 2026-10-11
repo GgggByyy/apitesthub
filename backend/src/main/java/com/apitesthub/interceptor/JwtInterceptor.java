@@ -26,6 +26,11 @@ public class JwtInterceptor implements HandlerInterceptor {
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler)
             throws Exception {
+        // CORS 预检请求（OPTIONS）不携带业务语义和 token，必须放行；
+        // 否则浏览器预检失败，所有跨域的受保护接口全部 Network Error（实测踩坑）
+        if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
+            return true;
+        }
         String auth = request.getHeader("Authorization");
         if (auth == null || !auth.startsWith("Bearer ")) {
             writeUnauthorized(response);

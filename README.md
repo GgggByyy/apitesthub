@@ -28,12 +28,21 @@
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
 | M0 | 工程骨架 + JWT 鉴权 + 统一响应/全局异常 + BCrypt | ✅ |
-| M1 | 项目/接口定义管理（CRUD + 试调） | ⬜ |
+| M1 | 项目/接口定义管理（CRUD + 试调 + Vue3 前端） | ✅ |
 | M2 | 执行引擎 v1：同步执行套件 + 断言 + 结果落库 | ⬜ |
 | M3 | 执行引擎 v2：线程池并发 + 参数化变量 + 链式调用 | ⬜ |
 | M4 | WebSocket 实时日志 + Redis 状态缓存/分布式锁 | ⬜ |
 | M5 | Quartz 定时回归 + 失败重跑 + 测试报告 | ⬜ |
 | M6 | Docker Compose 一键部署 + 单元测试 | ⬜ |
+
+## M1 已实现
+
+- **项目管理**：`GET/POST /api/projects`、`PUT/DELETE /api/projects/{id}`（删除级联清理接口定义，事务保证）
+- **接口定义管理**：`GET/POST /api/projects/{pid}/apis`、`PUT/DELETE /api/apis/{id}`，支持 method/url/headers/params/body（JSON 字段保存前校验合法性）
+- **发送试一下**：`POST /api/apis/{id}/try` —— 后端用 OkHttp 代理调用被测接口，返回 状态码/耗时/响应头/响应体（执行引擎的第一块砖）
+- **数据隔离**：所有操作校验项目归属（owner 不符统一 404）
+- **CORS**：放行 Vite 开发端口（localhost 与 127.0.0.1 两个 origin），预检 OPTIONS 在拦截器放行
+- **Vue3 前端**：登录页 / 项目列表 / 接口管理页（表格 + 表单弹窗 + 试调结果弹窗），axios 统一封装（自动带 token、401 踢回登录、统一错误提示）
 
 ## M0 已实现
 
@@ -79,6 +88,10 @@ cp backend/src/main/resources/application-local.yml.example backend/src/main/res
 
 # 4. 启动后端（JDK 17+，本仓库 Java 17 编译目标）
 cd backend && mvn spring-boot:run -Dspring-boot.run.profiles=local
+
+# 5. 启动前端开发服务器（Vue3 + Element Plus）
+cd frontend && npm install && npm run dev
+# 浏览器打开 http://localhost:5173，注册/登录后新建项目、录入接口、试调
 ```
 
 ## 目录结构（M0）
